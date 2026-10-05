@@ -1,12 +1,13 @@
+import os
 import time
 import ccxt
 import pandas as pd
 import requests
 from scipy.signal import find_peaks
 
-# --- НАСТРОЙКИ ---
-TELEGRAM_TOKEN = "ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER"  
-CHAT_ID = "ВАШ_CHAT_ID"                       
+# --- НАСТРОЙКИ (Берем из переменных окружения GitHub Actions) ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER")  
+CHAT_ID = os.environ.get("CHAT_ID", "ВАШ_CHAT_ID")                       
 
 # Подключаемся к Binance
 exchange = ccxt.binance({
@@ -17,7 +18,7 @@ exchange = ccxt.binance({
 last_signals = {}
 
 def send_telegram_message(message):
-    if TELEGRAM_TOKEN == "ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER":
+    if TELEGRAM_TOKEN == "ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER" or not TELEGRAM_TOKEN:
         print("⚠ Не указан Telegram Token или Chat ID!")
         return
     
@@ -113,12 +114,9 @@ def run_bot_iteration():
             print(f"Ошибка для {coin}: {e}")
 
 if __name__ == "__main__":
-    print("🤖 Бот запущен и проверяет рынок каждые 15 минут!")
-    while True:
-        try:
-            run_bot_iteration()
-        except Exception as e:
-            print(f"Общая ошибка в цикле: {e}")
-            
-        print("\n⏳ Ожидаем 15 минут до следующей проверки...")
-        time.sleep(900)  # Спит 900 секунд (15 минут)
+    print("🤖 Бот запущен в облаке GitHub Actions!")
+    try:
+        run_bot_iteration()
+        print("✅ Проверка успешно завершена.")
+    except Exception as e:
+        print(f"❌ Общая ошибка: {e}")
