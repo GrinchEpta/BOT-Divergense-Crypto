@@ -22,7 +22,7 @@ except Exception as e:
     print(f"Ошибка инициализации биржи: {e}")
     exit()
 
-# Словарь для защиты от спама: ключ = " монета_таймфрейм_сигнал_время "
+# Словарь для защиты от повторного спама
 last_signals = {}
 
 def send_telegram_message(message):
@@ -45,6 +45,7 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
+    # Метод сглаживания Уайлдера (как в TradingView)
     avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
     rs = avg_gain / avg_loss
@@ -84,25 +85,33 @@ def get_top_20_crypto_symbols():
 def check_divergence(df):
     closes = df['close'].values
     rsis = df['rsi'].values
+    total_bars = len(df)
     
-    peak_indices, _ = find_peaks(closes, distance=5, prominence=1) 
-    trough_indices, _ = find_peaks(-closes, distance=5, prominence=1)
+    # Строгие фильтры для отсеивания рыночного шума
+    peak_indices, _ = find_peaks(closes, distance=7, prominence=2.0) 
+    trough_indices, _ = find_peaks(-closes, distance=7, prominence=2.0)
     
     signals = []
 
-    # Медвежья дивергенция (цена выше, RSI ниже, RSI > 60)
+    # 1. Медвежья дивергенция (цена выше, RSI ниже, RSI > 58)
     if len(peak_indices) >= 2:
         p2, p1 = peak_indices[-1], peak_indices[-2]
-        if closes[p2] > closes[p1] and rsis[p2] < rsis[p1]:
-            if rsis[p2] > 60:
-                signals.append('🐻 BEARISH')
+        
+        # Проверяем свежесть последнего пика (должен быть сформирован недавно, в пределах 12 баров)
+        if (total_bars - p2) <= 12:
+            if closes[p2] > closes[p1] and rsis[p2] < rsis[p1]:
+                if rsis[p2] > 58:
+                    signals.append('🐻 BEARISH')
 
-    # Бычья дивергенция (цена ниже, RSI выше, RSI < 40)
+    # 2. Бычья дивергенция (цена ниже, RSI выше, RSI < 42)
     if len(trough_indices) >= 2:
         t2, t1 = trough_indices[-1], trough_indices[-2]
-        if closes[t2] < closes[t1] and rsis[t2] > rsis[t1]:
-            if rsis[t2] < 40:
-                signals.append('🐂 BULLISH')
+        
+        # Проверяем свежесть последней впадины
+        if (total_bars - t2) <= 12:
+            if closes[t2] < closes[t1] and rsis[t2] > rsis[t1]:
+                if rsis[t2] < 42:
+                    signals.append('🐂 BULLISH')
             
     return signals
 
@@ -112,10 +121,9 @@ def run_bot_iteration():
         print("⚠ Список монет пуст.")
         return
 
-    # Список таймфреймов для сканирования
     timeframes = ['4h', '1h', '30m']
 
-    print(f"\n🔍 Начинаем сканирование топ-20 по таймфреймам {timeframes} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"\n🔍 Сканируем топ-20 по таймфреймам {timeframes} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     
     for tf in timeframes:
         print(f"⏱ Сканирование таймфрейма: {tf}")
@@ -129,25 +137,27 @@ def run_bot_iteration():
                 df['rsi'] = calculate_rsi(df['close'], period=14)
                 
                 signals = check_divergence(df)
-                last_row = df.iloc[-2]  # Последняя закрытая свеча
+                
+                # Берем надежную закрытую свечу [-2]
+                last_row = df.iloc[-2]  
                 candle_time = last_row['timestamp']
                 
                 if signals:
                     signal_str = ", ".join(signals)
-                    # Уникальный ключ включает монету, таймфрейм и время свечи
                     signal_key = f"{coin}_{tf}_{candle_time}_{signal_str}"
                     
                     if last_signals.get(f"{coin}_{tf}") != signal_key:
                         last_signals[f"{coin}_{tf}"] = signal_key
+                        
                         msg = (
                             f"🚨 <b>Дивергенция RSI ({tf})</b>\n"
                             f"Биржа: MEXC (Топ-20)\n\n"
                             f"Монета: <b>{coin}</b>\n"
                             f"Сигнал: <b>{signal_str}</b>\n"
-                            f"Цена: {last_row['close']:.6f}\n"
+                            f"Цена закрытия: {last_row['close']:.6f}\n"
                             f"RSI: {last_row['rsi']:.2f}"
                         )
-                        print(f"🔥 НАЙДЕН СИГНАЛ | {coin} | TF: {tf} | {signal_str}")
+                        print(f"🔥 НАЙДЕН ТОЧНЫЙ СИГНАЛ | {coin} | TF: {tf} | {signal_str}")
                         send_telegram_message(msg)
                         
             except Exception as e:
@@ -156,7 +166,7 @@ def run_bot_iteration():
         print("-" * 40)
 
 if __name__ == "__main__":
-    print("🤖 Бот запущен в облаке GitHub Actions (MEXC, топ-20, мультитаймфрейм: 4h, 1h, 30m)!")
+    print("🤖 Бот запущен в режиме высокой точности!")
     try:
         run_bot_iteration()
         print("✅ Проверка завершена.")
