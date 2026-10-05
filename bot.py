@@ -9,8 +9,8 @@ from scipy.signal import find_peaks
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_БОТА_ИЗ_BOTFATHER")  
 CHAT_ID = os.environ.get("CHAT_ID", "ВАШ_CHAT_ID")                       
 
-# Подключаемся к Binance
-exchange = ccxt.binance({
+# Подключаемся к Bybit (альтернатива Binance)
+exchange = ccxt.bybit({
     'enableRateLimit': True,
 })
 
