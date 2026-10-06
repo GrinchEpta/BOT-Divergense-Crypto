@@ -1,4 +1,3 @@
-
 import os
 import time
 import ccxt
@@ -52,8 +51,8 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_top_25_crypto_symbols():
-    print("🔄 Загружаем топ-25 монет по объему с MEXC...")
+def get_top_20_crypto_symbols():
+    print("🔄 Загружаем топ-20 монет по объему с MEXC...")
     try:
         tickers = exchange.fetch_tickers()
         crypto_list = []
@@ -70,14 +69,14 @@ def get_top_25_crypto_symbols():
                     crypto_list.append({'symbol': symbol, 'volume': volume})
         
         crypto_list.sort(key=lambda x: x['volume'], reverse=True)
-        top_25 = [item['symbol'] for item in crypto_list[:25]]
+        top_20 = [item['symbol'] for item in crypto_list[:20]]
         
-        if not top_25:
+        if not top_20:
             print("❌ Не удалось получить список монет.")
             return []
             
-        print(f"✅ Топ-25 по объему загружен: {', '.join(top_25)}")
-        return top_25
+        print(f"✅ Топ-20 по объему загружен: {', '.join(top_20)}")
+        return top_20
         
     except Exception as e:
         print(f"❌ Ошибка при загрузке рынков с MEXC: {e}")
@@ -117,14 +116,14 @@ def check_divergence(df):
     return signals
 
 def run_bot_iteration():
-    top_coins = get_top_25_crypto_symbols()
+    top_coins = get_top_20_crypto_symbols()
     if not top_coins:
         print("⚠ Список монет пуст.")
         return
 
     timeframes = ['4h', '1h', '30m']
 
-    print(f"\n🔍 Сканируем топ-25 по таймфреймам {timeframes} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"\n🔍 Сканируем топ-20 по таймфреймам {timeframes} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     
     for tf in timeframes:
         print(f"⏱ Сканирование таймфрейма: {tf}")
@@ -152,7 +151,7 @@ def run_bot_iteration():
                         
                         msg = (
                             f"🚨 <b>Дивергенция RSI ({tf})</b>\n"
-                            f"Биржа: MEXC (Топ-25)\n\n"
+                            f"Биржа: MEXC (Топ-20)\n\n"
                             f"Монета: <b>{coin}</b>\n"
                             f"Сигнал: <b>{signal_str}</b>\n"
                             f"Цена закрытия: {last_row['close']:.6f}\n"
@@ -168,15 +167,8 @@ def run_bot_iteration():
 
 if __name__ == "__main__":
     print("🤖 Бот запущен в режиме высокой точности!")
-    print("⏱ Проверка будет выполняться каждые 5 минут.")
-
-    while True:
-        try:
-            run_bot_iteration()
-            print("✅ Проверка завершена.")
-            print("💤 Следующая проверка через 5 минут...")
-
-        except Exception as e:
-            print(f"❌ Общая ошибка: {e}")
-
-        time.sleep(5 * 60)
+    try:
+        run_bot_iteration()
+        print("✅ Проверка завершена.")
+    except Exception as e:
+        print(f"❌ Общая ошибка: {e}")
