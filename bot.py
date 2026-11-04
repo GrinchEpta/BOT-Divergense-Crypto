@@ -121,7 +121,8 @@ def run_bot_iteration():
         print("⚠ Список монет пуст.")
         return
 
-    timeframes = ['4h', '1h', '30m']
+    # Изменили таймфреймы: убран '4h', добавлены '15m', '30m', '1h'
+    timeframes = ['15m', '30m', '1h']
 
     print(f"\n🔍 Сканируем топ-20 по таймфреймам {timeframes} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     
