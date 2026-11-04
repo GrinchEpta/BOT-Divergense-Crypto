@@ -15,7 +15,7 @@ STATE_FILE = "fast_signals_state.json"
 TIMEFRAMES = ['15m', '30m', '1h']
 RSI_PERIOD = 14
 PIVOT_LEFT = 4       # Минимум 4 свечи слева ниже пика
-PIVOT_RIGHT = 1      # 1 закрытая свеча справа для мгновенного входа
+PIVOT_RIGHT = 1      # 1 закрытая свеча справа для быстрого сигнала
 MIN_PEAK_DIST = 5    # Мин. расстояние между двумя вершинами
 MAX_PEAK_DIST = 45   # Макс. расстояние между вершинами
 
@@ -25,7 +25,7 @@ try:
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     })
-    exchange.load_markets()
+    markets = exchange.load_markets()
 except Exception as e:
     print(f"❌ Ошибка инициализации биржи: {e}")
     exit(1)
@@ -54,7 +54,6 @@ def send_telegram_message(message, symbol):
         return
 
     base, quote = symbol.split('/')
-    # Прямая ссылка на фьючерсы BingX (формат: BTC-USDT)
     bingx_futures_url = f"https://bingx.com/ru-ru/perpetual/{base}-{quote}"
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -66,7 +65,7 @@ def send_telegram_message(message, symbol):
         'reply_markup': {
             'inline_keyboard': [
                 [
-                    {'text': '⚡ Открыть на BingX', 'url': bingx_futures_url}
+                    {'text': '⚡ Открыть график на BingX', 'url': bingx_futures_url}
                 ]
             ]
         }
@@ -86,26 +85,63 @@ def calculate_rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
 
-def get_top_20_crypto_symbols():
+def get_top_25_by_market_cap():
+    """
+    Загружает Топ-25 монет по рыночной капитализации через CoinGecko
+    и проверяет их доступность на бирже MEXC к USDT.
+    """
+    ignored_tokens = {
+        'USDT', 'USDC', 'BUSD', 'DAI', 'FDUSD', 'TUSD', 'USDD', 'USDE', 'PYUSD', 'USDS',
+        'WBTC', 'STETH', 'WSTETH', 'WEETH', 'WETH', 'CBETH', 'WBETH', 'LEO'
+    }
+    
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            'vs_currency': 'usd',
+            'order': 'market_cap_desc',
+            'per_page': 60,
+            'page': 1,
+            'sparkline': 'false'
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        top_25 = []
+        for coin in data:
+            base = coin.get('symbol', '').upper()
+            if base in ignored_tokens:
+                continue
+            
+            pair = f"{base}/USDT"
+            if pair in markets:
+                top_25.append(pair)
+                if len(top_25) == 25:
+                    break
+
+        if top_25:
+            print(f"✅ Топ-25 по капитализации загружен: {', '.join(top_25)}")
+            return top_25
+    except Exception as e:
+        print(f"⚠ Не удалось получить капитализацию с CoinGecko ({e}), берем резервный топ с MEXC...")
+
+    # Резервный вариант, если API CoinGecko временно недоступен
     try:
         tickers = exchange.fetch_tickers()
         crypto_list = []
-        stablecoins = {'USDT', 'USDC', 'BUSD', 'TUSD', 'DAI', 'FDUSD', 'USDD', 'USDE', 'PYUSD'}
-        exclude_patterns = ('3L', '3S', '5L', '5S', 'BEAR', 'BULL', 'UP', 'DOWN', 'HEDGE')
-
         for symbol, ticker in tickers.items():
             if symbol.endswith('/USDT'):
-                base_currency = symbol.split('/')[0]
-                if base_currency in stablecoins or any(p in base_currency for p in exclude_patterns):
+                base = symbol.split('/')[0]
+                if base in ignored_tokens:
                     continue
-                volume = ticker.get('quoteVolume') or 0
-                if volume > 0:
-                    crypto_list.append({'symbol': symbol, 'volume': volume})
-
+                vol = ticker.get('quoteVolume') or 0
+                if vol > 0:
+                    crypto_list.append({'symbol': symbol, 'volume': vol})
         crypto_list.sort(key=lambda x: x['volume'], reverse=True)
-        return [item['symbol'] for item in crypto_list[:20]]
+        return [item['symbol'] for item in crypto_list[:25]]
     except Exception as e:
-        print(f"❌ Ошибка загрузки топ-20: {e}")
+        print(f"❌ Ошибка резервной загрузки: {e}")
         return []
 
 def find_rsi_pivots(rsi_values, left=PIVOT_LEFT, right=PIVOT_RIGHT):
@@ -137,7 +173,7 @@ def check_fast_divergence(df):
     peaks, troughs = find_rsi_pivots(rsis, left=PIVOT_LEFT, right=PIVOT_RIGHT)
     signals = []
 
-    # 1. МЕДВЕЖЬЯ ДИВЕРГЕНЦИЯ (SHORT)
+    # 1. МЕДВЕЖЬЯ ДИВЕРГЕНЦИЯ (BEARISH)
     if len(peaks) >= 2:
         p2 = peaks[-1]
         if (n - 1 - p2) in (1, 2):
@@ -150,23 +186,17 @@ def check_fast_divergence(df):
                     candle_confirmed = closes[-1] < closes[p2]
 
                     if price_higher and rsi_lower and rsi_zone_ok and candle_confirmed:
-                        entry_price = closes[-1]
-                        stop_loss = max(highs[p2], highs[-1]) * 1.003
-                        support_level = np.min(lows[p1:p2+1])
-                        
                         signals.append({
-                            'type': '🐻 BEARISH (ШОРТ)',
+                            'type': '🐻 Медвежья дивергенция (Bearish)',
                             'peak_ts': int(timestamps[p2]),
-                            'entry': entry_price,
-                            'sl': stop_loss,
-                            'tp1': support_level,
+                            'price_now': closes[-1],
                             'rsi_p1': rsis[p1],
                             'rsi_p2': rsis[p2],
                             'rsi_now': rsis[-1]
                         })
                         break
 
-    # 2. БЫЧЬЯ ДИВЕРГЕНЦИЯ (LONG)
+    # 2. БЫЧЬЯ ДИВЕРГЕНЦИЯ (BULLISH)
     if len(troughs) >= 2:
         t2 = troughs[-1]
         if (n - 1 - t2) in (1, 2):
@@ -179,16 +209,10 @@ def check_fast_divergence(df):
                     candle_confirmed = closes[-1] > closes[t2]
 
                     if price_lower and rsi_higher and rsi_zone_ok and candle_confirmed:
-                        entry_price = closes[-1]
-                        stop_loss = min(lows[t2], lows[-1]) * 0.997
-                        resistance_level = np.max(highs[t1:t2+1])
-
                         signals.append({
-                            'type': '🐂 BULLISH (ЛОНГ)',
+                            'type': '🐂 Бычья дивергенция (Bullish)',
                             'peak_ts': int(timestamps[t2]),
-                            'entry': entry_price,
-                            'sl': stop_loss,
-                            'tp1': resistance_level,
+                            'price_now': closes[-1],
                             'rsi_p1': rsis[t1],
                             'rsi_p2': rsis[t2],
                             'rsi_now': rsis[-1]
@@ -214,13 +238,13 @@ def scan_single_pair(coin, tf):
         return None
 
 def run_scanner():
-    top_coins = get_top_20_crypto_symbols()
+    top_coins = get_top_25_by_market_cap()
     if not top_coins:
         print("⚠ Не удалось получить список монет.")
         return
 
     tasks = [(coin, tf) for tf in TIMEFRAMES for coin in top_coins]
-    print(f"⚡ Быстрое сканирование {len(tasks)} графиков — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⚡ Сканирование {len(tasks)} графиков (Топ-25 по капитализации) — {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(scan_single_pair, coin, tf) for coin, tf in tasks]
@@ -235,27 +259,22 @@ def run_scanner():
                     last_signals[f"{coin}_{tf}"] = signal_key
                     save_state(last_signals)
 
-                    risk_pct = abs(sig['entry'] - sig['sl']) / sig['entry'] * 100
-                    reward_pct = abs(sig['tp1'] - sig['entry']) / sig['entry'] * 100
-
                     msg = (
-                        f"⚡ <b>СИГНАЛ ВХОДА: {sig['type']}</b>\n"
-                        f"Монета: <b>#{coin.replace('/', '')}</b> | ТФ: <b>{tf}</b>\n"
+                        f"🔔 <b>Обнаружен сигнал ({tf})</b>\n"
+                        f"Монета: <b>#{coin.replace('/', '')}</b>\n"
+                        f"Паттерн: <b>{sig['type']}</b>\n"
                         f"────────────────────\n"
-                        f"🎯 <b>Точка входа (сейчас):</b> <code>{sig['entry']:.6g}</code>\n"
-                        f"🛑 <b>Стоп-лосс (за пик):</b> <code>{sig['sl']:.6g}</code> (-{risk_pct:.2f}%)\n"
-                        f"💰 <b>Тейк 1 (уровень):</b> <code>{sig['tp1']:.6g}</code> (+{reward_pct:.2f}%)\n"
-                        f"────────────────────\n"
-                        f"📉 <b>Дивергенция RSI:</b> {sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f} (сейчас: {sig['rsi_now']:.1f})\n"
-                        f"⏱ <i>Сформировано только что (задержка 1 свеча)!</i>"
+                        f"💵 Текущая цена: <code>{sig['price_now']:.6g}</code>\n"
+                        f"📊 RSI по пикам: <b>{sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f}</b> (сейчас: {sig['rsi_now']:.1f})"
                     )
                     print(f"🔥 НАЙДЕН СИГНАЛ: {coin} ({tf}) -> {sig['type']}")
                     send_telegram_message(msg, coin)
 
 if __name__ == "__main__":
-    print("🚀 Запуск сканера дивергенций...")
+    print("🚀 Запуск сканера дивергенций (Топ-25 Market Cap)...")
     try:
         run_scanner()
         print("✅ Проверка успешно завершена!")
     except Exception as e:
         print(f"❌ Общая ошибка: {e}")
+# === КОНЕЦ ФАЙЛА ===
