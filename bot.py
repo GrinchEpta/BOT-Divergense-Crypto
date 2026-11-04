@@ -54,9 +54,8 @@ def send_telegram_message(message, symbol):
         return
 
     base, quote = symbol.split('/')
-    mexc_spot_url = f"https://www.mexc.com/ru-RU/exchange/{base}_{quote}"
-    mexc_futures_url = f"https://futures.mexc.com/ru-RU/exchange/{base}_{quote}"
-    tv_url = f"https://www.tradingview.com/chart/?symbol=MEXC:{base}{quote}"
+    # Прямая ссылка на фьючерсы BingX (формат: BTC-USDT)
+    bingx_futures_url = f"https://bingx.com/ru-ru/perpetual/{base}-{quote}"
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -67,11 +66,7 @@ def send_telegram_message(message, symbol):
         'reply_markup': {
             'inline_keyboard': [
                 [
-                    {'text': '⚡ Фьючерсы MEXC', 'url': mexc_futures_url},
-                    {'text': '📈 Спот MEXC', 'url': mexc_spot_url}
-                ],
-                [
-                    {'text': '📊 Открыть в TradingView', 'url': tv_url}
+                    {'text': '⚡ Открыть на BingX', 'url': bingx_futures_url}
                 ]
             ]
         }
