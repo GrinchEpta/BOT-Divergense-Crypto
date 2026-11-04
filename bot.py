@@ -148,4 +148,119 @@ def check_fast_divergence(df):
         if (n - 1 - p2) in (1, 2):
             for p1 in reversed(peaks[:-1]):
                 dist = p2 - p1
-                if MIN_PE
+                if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
+                    price_higher = (highs[p2] > highs[p1]) or (closes[p2] > closes[p1])
+                    rsi_lower = rsis[p2] < (rsis[p1] - 1.5)
+                    rsi_zone_ok = (rsis[p1] >= 58) and (rsis[p2] >= 52)
+                    candle_confirmed = closes[-1] < closes[p2]
+
+                    if price_higher and rsi_lower and rsi_zone_ok and candle_confirmed:
+                        entry_price = closes[-1]
+                        stop_loss = max(highs[p2], highs[-1]) * 1.003
+                        support_level = np.min(lows[p1:p2+1])
+                        
+                        signals.append({
+                            'type': '🐻 BEARISH (ШОРТ)',
+                            'peak_ts': int(timestamps[p2]),
+                            'entry': entry_price,
+                            'sl': stop_loss,
+                            'tp1': support_level,
+                            'rsi_p1': rsis[p1],
+                            'rsi_p2': rsis[p2],
+                            'rsi_now': rsis[-1]
+                        })
+                        break
+
+    # 2. БЫЧЬЯ ДИВЕРГЕНЦИЯ (LONG)
+    if len(troughs) >= 2:
+        t2 = troughs[-1]
+        if (n - 1 - t2) in (1, 2):
+            for t1 in reversed(troughs[:-1]):
+                dist = t2 - t1
+                if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
+                    price_lower = (lows[t2] < lows[t1]) or (closes[t2] < closes[t1])
+                    rsi_higher = rsis[t2] > (rsis[t1] + 1.5)
+                    rsi_zone_ok = (rsis[t1] <= 42) and (rsis[t2] <= 48)
+                    candle_confirmed = closes[-1] > closes[t2]
+
+                    if price_lower and rsi_higher and rsi_zone_ok and candle_confirmed:
+                        entry_price = closes[-1]
+                        stop_loss = min(lows[t2], lows[-1]) * 0.997
+                        resistance_level = np.max(highs[t1:t2+1])
+
+                        signals.append({
+                            'type': '🐂 BULLISH (ЛОНГ)',
+                            'peak_ts': int(timestamps[t2]),
+                            'entry': entry_price,
+                            'sl': stop_loss,
+                            'tp1': resistance_level,
+                            'rsi_p1': rsis[t1],
+                            'rsi_p2': rsis[t2],
+                            'rsi_now': rsis[-1]
+                        })
+                        break
+
+    return signals
+
+def scan_single_pair(coin, tf):
+    try:
+        ohlcv = exchange.fetch_ohlcv(coin, timeframe=tf, limit=120)
+        if len(ohlcv) < 60:
+            return None
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['rsi'] = calculate_rsi(df['close'], period=RSI_PERIOD)
+
+        df_closed = df.iloc[:-1].reset_index(drop=True)
+        found_signals = check_fast_divergence(df_closed)
+
+        return (coin, tf, found_signals)
+    except Exception:
+        return None
+
+def run_scanner():
+    top_coins = get_top_20_crypto_symbols()
+    if not top_coins:
+        print("⚠ Не удалось получить список монет.")
+        return
+
+    tasks = [(coin, tf) for tf in TIMEFRAMES for coin in top_coins]
+    print(f"⚡ Быстрое сканирование {len(tasks)} графиков — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(scan_single_pair, coin, tf) for coin, tf in tasks]
+        for future in as_completed(futures):
+            result = future.result()
+            if not result:
+                continue
+            coin, tf, signals = result
+            for sig in signals:
+                signal_key = f"{coin}_{tf}_{sig['peak_ts']}_{sig['type']}"
+                if last_signals.get(f"{coin}_{tf}") != signal_key:
+                    last_signals[f"{coin}_{tf}"] = signal_key
+                    save_state(last_signals)
+
+                    risk_pct = abs(sig['entry'] - sig['sl']) / sig['entry'] * 100
+                    reward_pct = abs(sig['tp1'] - sig['entry']) / sig['entry'] * 100
+
+                    msg = (
+                        f"⚡ <b>СИГНАЛ ВХОДА: {sig['type']}</b>\n"
+                        f"Монета: <b>#{coin.replace('/', '')}</b> | ТФ: <b>{tf}</b>\n"
+                        f"────────────────────\n"
+                        f"🎯 <b>Точка входа (сейчас):</b> <code>{sig['entry']:.6g}</code>\n"
+                        f"🛑 <b>Стоп-лосс (за пик):</b> <code>{sig['sl']:.6g}</code> (-{risk_pct:.2f}%)\n"
+                        f"💰 <b>Тейк 1 (уровень):</b> <code>{sig['tp1']:.6g}</code> (+{reward_pct:.2f}%)\n"
+                        f"────────────────────\n"
+                        f"📉 <b>Дивергенция RSI:</b> {sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f} (сейчас: {sig['rsi_now']:.1f})\n"
+                        f"⏱ <i>Сформировано только что (задержка 1 свеча)!</i>"
+                    )
+                    print(f"🔥 НАЙДЕН СИГНАЛ: {coin} ({tf}) -> {sig['type']}")
+                    send_telegram_message(msg, coin)
+
+if __name__ == "__main__":
+    print("🚀 Запуск сканера дивергенций...")
+    try:
+        run_scanner()
+        print("✅ Проверка успешно завершена!")
+    except Exception as e:
+        print(f"❌ Общая ошибка: {e}")
