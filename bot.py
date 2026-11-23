@@ -19,14 +19,14 @@ STATE_FILE = "fast_signals_state.json"
 TOP_N_COINS = 30
 TIMEFRAMES = ['30m', '1h']  # 30-минутный и часовой таймфреймы
 RSI_PERIOD = 14
-PIVOT_LEFT = 5          # Свечей слева до пика
-PIVOT_RIGHT = 2         # 2 закрытые свечи справа для подтверждения
-MIN_PEAK_DIST = 6       # Мин. расстояние между экстремумами (свечей)
-MAX_PEAK_DIST = 45      # Макс. расстояние между экстремумами (свечей)
+PIVOT_LEFT = 5          # Свечей слева до пика (как в TradingView)
+PIVOT_RIGHT = 2         # 2 закрытые свечи справа для быстрого подтверждения
+MIN_PEAK_DIST = 5       # Мин. расстояние между соседними пиками (как в TV)
+MAX_PEAK_DIST = 60      # Макс. расстояние между соседними пиками (как в TV)
 
-# ЖЁСТКИЕ ФИЛЬТРЫ (отсекают слабый боковик)
+# ФИЛЬТРЫ ПРОТИВ БОКОВИКА
 MIN_PRICE_DIFF_PCT = 0.008  # Мин. разница между пиками цены: 0.8%
-MIN_RSI_DIFF = 4.5          # Мин. разница между пиками RSI: 4.5 пункта
+MIN_RSI_DIFF = 4.0          # Мин. разница между пиками RSI: 4 пункта
 
 STABLECOINS = {
     'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
@@ -115,6 +115,24 @@ def find_pivots(values, left=PIVOT_LEFT, right=PIVOT_RIGHT):
             troughs.append(i)
     return peaks, troughs
 
+def is_line_clean(values, idx1, idx2, is_upper=True):
+    """
+    Проверяет, что между точками idx1 и idx2 нет «прокола» прямой линии.
+    is_upper=True — для пиков (ни одна точка между ними не должна быть выше линии).
+    is_upper=False — для впадин (ни одна точка между ними не должна быть ниже линии).
+    """
+    if idx2 - idx1 <= 1:
+        return True
+    y1, y2 = values[idx1], values[idx2]
+    for i in range(idx1 + 1, idx2):
+        ratio = (i - idx1) / (idx2 - idx1)
+        line_val = y1 + (y2 - y1) * ratio
+        if is_upper and values[i] > line_val * 1.001:
+            return False
+        if not is_upper and values[i] < line_val * 0.999:
+            return False
+    return True
+
 def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
     """Создаёт 3-панельный скриншот: Цена, RSI, Объём с линиями дивергенции."""
     fig, (ax1, ax2, ax3) = plt.subplots(
@@ -152,18 +170,15 @@ def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
     else:
         y_price_1, y_price_2 = df['low'].iloc[p1_idx], df['low'].iloc[p2_idx]
 
-    # Линия на цене
     ax1.plot([d1, d2], [y_price_1, y_price_2], color=line_color, linewidth=2.5, marker='o')
     price_arrow = "↑" if y_price_2 > y_price_1 else "↓"
     ax1.text(d2, y_price_2, f"  Цена {price_arrow}", color=line_color, fontsize=10, fontweight='bold')
 
-    # Линия на RSI
     y_rsi_1, y_rsi_2 = df['rsi'].iloc[p1_idx], df['rsi'].iloc[p2_idx]
     ax2.plot([d1, d2], [y_rsi_1, y_rsi_2], color=line_color, linewidth=2.5, marker='o')
     rsi_arrow = "↑" if y_rsi_2 > y_rsi_1 else "↓"
     ax2.text(d2, y_rsi_2, f"  RSI {rsi_arrow}", color=line_color, fontsize=10, fontweight='bold')
 
-    # Линия на объёмах (если есть подтверждение)
     if sig['vol_div']:
         y_vol_1, y_vol_2 = df['volume'].iloc[p1_idx], df['volume'].iloc[p2_idx]
         ax3.plot([d1, d2], [y_vol_1, y_vol_2], color=line_color, linewidth=2, linestyle='--', marker='o')
@@ -212,7 +227,8 @@ def send_telegram_with_photo(message, photo_path, symbol):
 
 def check_divergences_and_volumes(df, max_age=2):
     """
-    Ищет резкие Классические и Скрытые дивергенции.
+    Ищет чистые дивергенции строго по соседним экстремумам (механизм TradingView),
+    без проколов линии посередине.
     """
     closes = df['close'].values
     highs = df['high'].values
@@ -225,97 +241,91 @@ def check_divergences_and_volumes(df, max_age=2):
     rsi_peaks, rsi_troughs = find_pivots(rsis)
     signals = []
 
-    # --- МЕДВЕЖЬИ (ПО ПИКАМ): Классическая и Скрытая ---
+    # --- МЕДВЕЖЬИ (ПО СОСЕДНИМ ПИКАМ) ---
     if len(rsi_peaks) >= 2:
-        p2 = rsi_peaks[-1]
+        p1, p2 = rsi_peaks[-2], rsi_peaks[-1]
         age = n - 1 - p2
-        if 1 <= age <= max_age:
-            for p1 in reversed(rsi_peaks[:-1]):
-                dist = p2 - p1
-                if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-                    # 1. Классическая медвежья (Цена ↑, RSI ↓)
-                    classic_bear = (
-                        highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
-                        rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
-                        rsis[p1] >= 65
-                    )
-                    # 2. Скрытая медвежья (Цена ↓, RSI ↑)
-                    hidden_bear = (
-                        highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
-                        rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
-                        rsis[p2] >= 55
-                    )
+        dist = p2 - p1
 
-                    if classic_bear or hidden_bear:
-                        sig_kind = "BEAR_CLASSIC" if classic_bear else "BEAR_HIDDEN"
-                        sig_label = (
-                            "🐻 Классическая медвежья (Шорт)"
-                            if classic_bear else
-                            "🐻 Скрытая медвежья (Шорт по тренду)"
-                        )
-                        vol_div = volumes[p2] < volumes[p1]
-                        signals.append({
-                            'id': f"{sig_kind}_{int(timestamps[p2])}",
-                            'direction': 'BEAR',
-                            'type': sig_label,
-                            'p1_idx': p1,
-                            'p2_idx': p2,
-                            'age': age,
-                            'price_p1': highs[p1],
-                            'price_p2': highs[p2],
-                            'price_now': closes[-1],
-                            'rsi_p1': rsis[p1],
-                            'rsi_p2': rsis[p2],
-                            'rsi_now': rsis[-1],
-                            'vol_div': vol_div
-                        })
-                        break
+        if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
+            # Проверяем отсутствие проколов на RSI и цене
+            if is_line_clean(rsis, p1, p2, is_upper=True) and is_line_clean(highs, p1, p2, is_upper=True):
+                classic_bear = (
+                    highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
+                    rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
+                    rsis[p1] >= 65
+                )
+                hidden_bear = (
+                    highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
+                    rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
+                    rsis[p2] >= 55
+                )
 
-    # --- БЫЧЬИ (ПО ВПАДИНАМ): Классическая и Скрытая ---
+                if classic_bear or hidden_bear:
+                    sig_kind = "BEAR_CLASSIC" if classic_bear else "BEAR_HIDDEN"
+                    sig_label = (
+                        "🐻 Классическая медвежья (Шорт)"
+                        if classic_bear else
+                        "🐻 Скрытая медвежья (Шорт по тренду)"
+                    )
+                    signals.append({
+                        'id': f"{sig_kind}_{int(timestamps[p2])}",
+                        'direction': 'BEAR',
+                        'type': sig_label,
+                        'p1_idx': p1,
+                        'p2_idx': p2,
+                        'age': age,
+                        'price_p1': highs[p1],
+                        'price_p2': highs[p2],
+                        'price_now': closes[-1],
+                        'rsi_p1': rsis[p1],
+                        'rsi_p2': rsis[p2],
+                        'rsi_now': rsis[-1],
+                        'vol_div': volumes[p2] < volumes[p1]
+                    })
+
+    # --- БЫЧЬИ (ПО СОСЕДНИМ ВПАДИНАМ) ---
     if len(rsi_troughs) >= 2:
-        t2 = rsi_troughs[-1]
+        t1, t2 = rsi_troughs[-2], rsi_troughs[-1]
         age = n - 1 - t2
-        if 1 <= age <= max_age:
-            for t1 in reversed(rsi_troughs[:-1]):
-                dist = t2 - t1
-                if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-                    # 1. Классическая бычья (Цена ↓, RSI ↑)
-                    classic_bull = (
-                        lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
-                        rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
-                        rsis[t1] <= 35
-                    )
-                    # 2. Скрытая бычья (Цена ↑, RSI ↓)
-                    hidden_bull = (
-                        lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
-                        rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
-                        rsis[t2] <= 45
-                    )
+        dist = t2 - t1
 
-                    if classic_bull or hidden_bull:
-                        sig_kind = "BULL_CLASSIC" if classic_bull else "BULL_HIDDEN"
-                        sig_label = (
-                            "🐂 Классическая бычья (Лонг)"
-                            if classic_bull else
-                            "🐂 Скрытая бычья (Лонг по тренду)"
-                        )
-                        vol_div = volumes[t2] < volumes[t1]
-                        signals.append({
-                            'id': f"{sig_kind}_{int(timestamps[t2])}",
-                            'direction': 'BULL',
-                            'type': sig_label,
-                            'p1_idx': t1,
-                            'p2_idx': t2,
-                            'age': age,
-                            'price_p1': lows[t1],
-                            'price_p2': lows[t2],
-                            'price_now': closes[-1],
-                            'rsi_p1': rsis[t1],
-                            'rsi_p2': rsis[t2],
-                            'rsi_now': rsis[-1],
-                            'vol_div': vol_div
-                        })
-                        break
+        if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
+            # Проверяем отсутствие проколов на RSI и цене
+            if is_line_clean(rsis, t1, t2, is_upper=False) and is_line_clean(lows, t1, t2, is_upper=False):
+                classic_bull = (
+                    lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
+                    rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
+                    rsis[t1] <= 35
+                )
+                hidden_bull = (
+                    lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
+                    rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
+                    rsis[t2] <= 45
+                )
+
+                if classic_bull or hidden_bull:
+                    sig_kind = "BULL_CLASSIC" if classic_bull else "BULL_HIDDEN"
+                    sig_label = (
+                        "🐂 Классическая бычья (Лонг)"
+                        if classic_bull else
+                        "🐂 Скрытая бычья (Лонг по тренду)"
+                    )
+                    signals.append({
+                        'id': f"{sig_kind}_{int(timestamps[t2])}",
+                        'direction': 'BULL',
+                        'type': sig_label,
+                        'p1_idx': t1,
+                        'p2_idx': t2,
+                        'age': age,
+                        'price_p1': lows[t1],
+                        'price_p2': lows[t2],
+                        'price_now': closes[-1],
+                        'rsi_p1': rsis[t1],
+                        'rsi_p2': rsis[t2],
+                        'rsi_now': rsis[-1],
+                        'vol_div': volumes[t2] < volumes[t1]
+                    })
 
     return signals
 
@@ -387,8 +397,8 @@ def run_scanner():
                 if os.path.exists(photo_name):
                     os.remove(photo_name)
 
-    # Одноразовый реальный пример по новым жёстким фильтрам (если прямо сейчас нет свежего сигнала)
-    real_example_key = "REAL_EXAMPLE_SENT_V2"
+    # Одноразовый чистый пример для проверки нового алгоритма
+    real_example_key = "REAL_EXAMPLE_SENT_V3"
     if live_sent_count == 0 and real_example_key not in sent_signals:
         best_candidate = None
         for coin, tf, df_closed in scanned_data:
