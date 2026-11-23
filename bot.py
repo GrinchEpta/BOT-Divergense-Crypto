@@ -16,17 +16,17 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 STATE_FILE = "fast_signals_state.json"
 
-TOP_N_COINS = 30
+TOP_N_COINS = 50
 TIMEFRAMES = ['30m', '1h']  # 30-минутный и часовой таймфреймы
 RSI_PERIOD = 14
 PIVOT_LEFT = 5          # Свечей слева до пика (как в TradingView)
-PIVOT_RIGHT = 2         # 2 закрытые свечи справа для быстрого подтверждения
-MIN_PEAK_DIST = 5       # Мин. расстояние между соседними пиками (как в TV)
-MAX_PEAK_DIST = 60      # Макс. расстояние между соседними пиками (как в TV)
+PIVOT_RIGHT = 2         # 2 закрытые свечи справа для подтверждения
+MIN_PEAK_DIST = 5       # Мин. расстояние между соседними пиками
+MAX_PEAK_DIST = 60      # Макс. расстояние между соседними пиками
 
 # ФИЛЬТРЫ ПРОТИВ БОКОВИКА
-MIN_PRICE_DIFF_PCT = 0.008  # Мин. разница между пиками цены: 0.8%
-MIN_RSI_DIFF = 4.0          # Мин. разница между пиками RSI: 4 пункта
+MIN_PRICE_DIFF_PCT = 0.006  # Мин. разница между пиками цены: 0.6%
+MIN_RSI_DIFF = 3.5          # Мин. разница между пиками RSI: 3.5 пункта
 
 STABLECOINS = {
     'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
@@ -70,7 +70,7 @@ def get_top_coins(limit=TOP_N_COINS):
         print(f"📋 Загружен топ-{len(top_symbols)} монет MEXC: {', '.join(top_symbols[:10])}...")
         return top_symbols if top_symbols else FALLBACK_COINS
     except Exception as e:
-        print(f"⚠ Не удалось загрузить топ-30 ({e}), использую резервный список.")
+        print(f"⚠ Не удалось загрузить топ-{limit} ({e}), использую резервный список.")
         return [c for c in FALLBACK_COINS if c in markets]
 
 def load_state():
@@ -117,9 +117,7 @@ def find_pivots(values, left=PIVOT_LEFT, right=PIVOT_RIGHT):
 
 def is_line_clean(values, idx1, idx2, is_upper=True):
     """
-    Проверяет, что между точками idx1 и idx2 нет «прокола» прямой линии.
-    is_upper=True — для пиков (ни одна точка между ними не должна быть выше линии).
-    is_upper=False — для впадин (ни одна точка между ними не должна быть ниже линии).
+    Проверяет, что на RSI между точками idx1 и idx2 нет «прокола» линии.
     """
     if idx2 - idx1 <= 1:
         return True
@@ -127,9 +125,9 @@ def is_line_clean(values, idx1, idx2, is_upper=True):
     for i in range(idx1 + 1, idx2):
         ratio = (i - idx1) / (idx2 - idx1)
         line_val = y1 + (y2 - y1) * ratio
-        if is_upper and values[i] > line_val * 1.001:
+        if is_upper and values[i] > line_val + 1.0:
             return False
-        if not is_upper and values[i] < line_val * 0.999:
+        if not is_upper and values[i] < line_val - 1.0:
             return False
     return True
 
@@ -228,7 +226,7 @@ def send_telegram_with_photo(message, photo_path, symbol):
 def check_divergences_and_volumes(df, max_age=2):
     """
     Ищет чистые дивергенции строго по соседним экстремумам (механизм TradingView),
-    без проколов линии посередине.
+    без проколов линии RSI посередине.
     """
     closes = df['close'].values
     highs = df['high'].values
@@ -248,17 +246,16 @@ def check_divergences_and_volumes(df, max_age=2):
         dist = p2 - p1
 
         if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-            # Проверяем отсутствие проколов на RSI и цене
-            if is_line_clean(rsis, p1, p2, is_upper=True) and is_line_clean(highs, p1, p2, is_upper=True):
+            if is_line_clean(rsis, p1, p2, is_upper=True):
                 classic_bear = (
                     highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
                     rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
-                    rsis[p1] >= 65
+                    rsis[p1] >= 62
                 )
                 hidden_bear = (
                     highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
                     rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
-                    rsis[p2] >= 55
+                    rsis[p2] >= 52
                 )
 
                 if classic_bear or hidden_bear:
@@ -291,17 +288,16 @@ def check_divergences_and_volumes(df, max_age=2):
         dist = t2 - t1
 
         if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-            # Проверяем отсутствие проколов на RSI и цене
-            if is_line_clean(rsis, t1, t2, is_upper=False) and is_line_clean(lows, t1, t2, is_upper=False):
+            if is_line_clean(rsis, t1, t2, is_upper=False):
                 classic_bull = (
                     lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
                     rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
-                    rsis[t1] <= 35
+                    rsis[t1] <= 38
                 )
                 hidden_bull = (
                     lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
                     rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
-                    rsis[t2] <= 45
+                    rsis[t2] <= 48
                 )
 
                 if classic_bull or hidden_bull:
@@ -397,12 +393,12 @@ def run_scanner():
                 if os.path.exists(photo_name):
                     os.remove(photo_name)
 
-    # Одноразовый чистый пример для проверки нового алгоритма
-    real_example_key = "REAL_EXAMPLE_SENT_V3"
+    # Одноразовый чистый пример из топ-50 для проверки
+    real_example_key = "REAL_EXAMPLE_SENT_V4"
     if live_sent_count == 0 and real_example_key not in sent_signals:
         best_candidate = None
         for coin, tf, df_closed in scanned_data:
-            recent_sigs = check_divergences_and_volumes(df_closed, max_age=25)
+            recent_sigs = check_divergences_and_volumes(df_closed, max_age=35)
             for sig in recent_sigs:
                 if best_candidate is None or sig['age'] < best_candidate[2]['age']:
                     best_candidate = (coin, tf, sig, df_closed)
