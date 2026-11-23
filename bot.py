@@ -16,7 +16,20 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 STATE_FILE = "fast_signals_state.json"
 
-TOP_N_COINS = 50
+# Строгий список монет для сканирования
+TARGET_COINS = [
+    'BTC/USDT',
+    'ETH/USDT',
+    'SOL/USDT',
+    'ZEC/USDT',
+    'XRP/USDT',
+    'ADA/USDT',
+    'BNB/USDT',
+    'HYPE/USDT',
+    'BCH/USDT',
+    'XMR/USDT'
+]
+
 TIMEFRAMES = ['30m', '1h']  # 30-минутный и часовой таймфреймы
 RSI_PERIOD = 14
 PIVOT_LEFT = 5          # Свечей слева до пика (как в TradingView)
@@ -28,16 +41,6 @@ MAX_PEAK_DIST = 60      # Макс. расстояние между соседн
 MIN_PRICE_DIFF_PCT = 0.006  # Мин. разница между пиками цены: 0.6%
 MIN_RSI_DIFF = 3.5          # Мин. разница между пиками RSI: 3.5 пункта
 
-STABLECOINS = {
-    'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
-    'USDD', 'PYUSD', 'EUR', 'USD1', 'USDP', 'RLUSD'
-}
-
-FALLBACK_COINS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
-    'ADA/USDT', 'LTC/USDT', 'BCH/USDT', 'XMR/USDT', 'ZEC/USDT', 'HYPE/USDT'
-]
-
 try:
     exchange = ccxt.mexc({
         'enableRateLimit': True,
@@ -47,31 +50,6 @@ try:
 except Exception as e:
     print(f"❌ Ошибка инициализации MEXC: {e}")
     exit(1)
-
-def get_top_coins(limit=TOP_N_COINS):
-    """Загружает топ-N самых ликвидных USDT-пар на MEXC по суточному объёму."""
-    try:
-        tickers = exchange.fetch_tickers()
-        valid_pairs = []
-        for symbol, ticker in tickers.items():
-            if not symbol.endswith('/USDT') or symbol not in markets:
-                continue
-            if not markets[symbol].get('active', True):
-                continue
-            base = symbol.split('/')[0]
-            if base in STABLECOINS or base.endswith(('3L', '3S', '5L', '5S')):
-                continue
-            vol = ticker.get('quoteVolume') or 0
-            if vol > 0:
-                valid_pairs.append((symbol, vol))
-
-        valid_pairs.sort(key=lambda x: x[1], reverse=True)
-        top_symbols = [pair[0] for pair in valid_pairs[:limit]]
-        print(f"📋 Загружен топ-{len(top_symbols)} монет MEXC: {', '.join(top_symbols[:10])}...")
-        return top_symbols if top_symbols else FALLBACK_COINS
-    except Exception as e:
-        print(f"⚠ Не удалось загрузить топ-{limit} ({e}), использую резервный список.")
-        return [c for c in FALLBACK_COINS if c in markets]
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -116,9 +94,7 @@ def find_pivots(values, left=PIVOT_LEFT, right=PIVOT_RIGHT):
     return peaks, troughs
 
 def is_line_clean(values, idx1, idx2, is_upper=True):
-    """
-    Проверяет, что на RSI между точками idx1 и idx2 нет «прокола» линии.
-    """
+    """Проверяет, что на RSI между точками idx1 и idx2 нет «прокола» линии."""
     if idx2 - idx1 <= 1:
         return True
     y1, y2 = values[idx1], values[idx2]
@@ -340,11 +316,11 @@ def scan_single_pair(coin, tf):
         print(f"⚠ Ошибка сканирования {coin} {tf}: {e}")
         return None
 
-def format_message(coin, tf, sig, df_closed, header_prefix="🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ"):
+def format_message(coin, tf, sig, df_closed):
     vol_status = "✅ Да (Подтверждено! 🔥)" if sig['vol_div'] else "❌ Нет (Только RSI)"
     price_diff_pct = ((sig['price_p2'] - sig['price_p1']) / sig['price_p1']) * 100
     return (
-        f"{header_prefix} ({tf})</b>\n\n"
+        f"🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ ({tf})</b>\n\n"
         f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
         f"Паттерн: <b>{sig['type']}</b>\n"
         f"────────────────────────\n"
@@ -358,13 +334,10 @@ def format_message(coin, tf, sig, df_closed, header_prefix="🔔 <b>СИГНАЛ
 def run_scanner():
     sent_signals = load_state()
     state_modified = False
-    live_sent_count = 0
 
-    top_coins = get_top_coins(TOP_N_COINS)
-    tasks = [(coin, tf) for tf in TIMEFRAMES for coin in top_coins]
-    print(f"⚡ Старт сканирования {len(tasks)} графиков (топ-{len(top_coins)} MEXC) — {time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    scanned_data = []
+    available_coins = [pair for pair in TARGET_COINS if pair in markets]
+    tasks = [(coin, tf) for tf in TIMEFRAMES for coin in available_coins]
+    print(f"⚡ Старт сканирования {len(tasks)} графиков ({len(available_coins)} монет MEXC) — {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(scan_single_pair, coin, tf) for coin, tf in tasks]
@@ -373,7 +346,6 @@ def run_scanner():
             if not res:
                 continue
             coin, tf, signals, df_closed = res
-            scanned_data.append((coin, tf, df_closed))
 
             for sig in signals:
                 unique_key = f"{coin}_{tf}_{sig['id']}"
@@ -388,35 +360,9 @@ def run_scanner():
                 if send_telegram_with_photo(msg, photo_name, coin):
                     sent_signals[unique_key] = int(time.time())
                     state_modified = True
-                    live_sent_count += 1
 
                 if os.path.exists(photo_name):
                     os.remove(photo_name)
-
-    # Одноразовый чистый пример из топ-50 для проверки
-    real_example_key = "REAL_EXAMPLE_SENT_V4"
-    if live_sent_count == 0 and real_example_key not in sent_signals:
-        best_candidate = None
-        for coin, tf, df_closed in scanned_data:
-            recent_sigs = check_divergences_and_volumes(df_closed, max_age=35)
-            for sig in recent_sigs:
-                if best_candidate is None or sig['age'] < best_candidate[2]['age']:
-                    best_candidate = (coin, tf, sig, df_closed)
-
-        if best_candidate:
-            coin, tf, sig, df_closed = best_candidate
-            photo_name = f"real_example_{coin.replace('/', '_')}_{tf}.png"
-            generate_divergence_chart(df_closed, tf, coin, sig, filename=photo_name)
-            msg = format_message(
-                coin, tf, sig, df_closed,
-                header_prefix=f"🔎 <b>РЕАЛЬНЫЙ ПРИМЕР (сформирован {sig['age']} свеч. назад)"
-            )
-            print(f"🔎 Отправка реального примера: {coin} {tf} (возраст: {sig['age']} свечей)")
-            if send_telegram_with_photo(msg, photo_name, coin):
-                sent_signals[real_example_key] = int(time.time())
-                state_modified = True
-            if os.path.exists(photo_name):
-                os.remove(photo_name)
 
     if state_modified:
         save_state(sent_signals)
