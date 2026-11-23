@@ -19,10 +19,14 @@ STATE_FILE = "fast_signals_state.json"
 TOP_N_COINS = 30
 TIMEFRAMES = ['30m', '1h']  # 30-минутный и часовой таймфреймы
 RSI_PERIOD = 14
-PIVOT_LEFT = 5       # Свечей слева до пика
-PIVOT_RIGHT = 2      # 2 закрытые свечи справа для подтверждения
-MIN_PEAK_DIST = 5    # Мин. расстояние между экстремумами
-MAX_PEAK_DIST = 45   # Макс. расстояние
+PIVOT_LEFT = 5          # Свечей слева до пика
+PIVOT_RIGHT = 2         # 2 закрытые свечи справа для подтверждения
+MIN_PEAK_DIST = 6       # Мин. расстояние между экстремумами (свечей)
+MAX_PEAK_DIST = 45      # Макс. расстояние между экстремумами (свечей)
+
+# ЖЁСТКИЕ ФИЛЬТРЫ (отсекают слабый боковик)
+MIN_PRICE_DIFF_PCT = 0.008  # Мин. разница между пиками цены: 0.8%
+MIN_RSI_DIFF = 4.5          # Мин. разница между пиками RSI: 4.5 пункта
 
 STABLECOINS = {
     'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
@@ -124,11 +128,11 @@ def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
     bar_width = (dates.iloc[1] - dates.iloc[0]) * 0.6
 
     # --- 1. ПАНЕЛЬ ЦЕНЫ ---
-    ax1.plot(dates, df['close'], color='#5dade2', label='Цена закрытия', linewidth=1.5)
-    ax1.fill_between(dates, df['low'], df['high'], color='#5dade2', alpha=0.1)
+    ax1.plot(dates, df['close'], color='#5dade2', linewidth=1.5)
+    ax1.fill_between(dates, df['low'], df['high'], color='#5dade2', alpha=0.12)
 
     # --- 2. ПАНЕЛЬ RSI ---
-    ax2.plot(dates, df['rsi'], color='#af7ac5', label='RSI (14)', linewidth=1.5)
+    ax2.plot(dates, df['rsi'], color='#af7ac5', linewidth=1.5)
     ax2.axhline(70, color='red', linestyle='--', alpha=0.5, linewidth=0.8)
     ax2.axhline(30, color='green', linestyle='--', alpha=0.5, linewidth=0.8)
     ax2.axhline(50, color='gray', linestyle=':', alpha=0.3)
@@ -138,26 +142,32 @@ def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
     colors = ['#27ae60' if c >= o else '#e74c3c' for c, o in zip(df['close'], df['open'])]
     ax3.bar(dates, df['volume'], color=colors, alpha=0.8, width=bar_width)
 
-    # Рисуем линии дивергенции по точкам
     p1_idx, p2_idx = sig['p1_idx'], sig['p2_idx']
     d1, d2 = dates.iloc[p1_idx], dates.iloc[p2_idx]
+    is_bear = sig['direction'] == 'BEAR'
+    line_color = '#f39c12' if is_bear else '#2ecc71'
 
-    if "🐻" in sig['type']:  # Медвежья (по пикам)
-        ax1.plot([d1, d2], [df['high'].iloc[p1_idx], df['high'].iloc[p2_idx]], color='#f39c12', linewidth=2.5, marker='o')
-        ax1.text(d2, df['high'].iloc[p2_idx], "  Максимумы ↑", color='#f39c12', fontsize=10, fontweight='bold')
-        ax2.plot([d1, d2], [df['rsi'].iloc[p1_idx], df['rsi'].iloc[p2_idx]], color='#f39c12', linewidth=2.5, marker='o')
-        ax2.text(d2, df['rsi'].iloc[p2_idx], "  RSI ↓", color='#f39c12', fontsize=10, fontweight='bold')
-        if sig['vol_div']:
-            ax3.plot([d1, d2], [df['volume'].iloc[p1_idx], df['volume'].iloc[p2_idx]], color='#e67e22', linewidth=2, linestyle='--', marker='o')
-            ax3.text(d2, df['volume'].iloc[p2_idx], "  Объём ↓", color='#e67e22', fontsize=9)
-    else:  # Бычья (по впадинам)
-        ax1.plot([d1, d2], [df['low'].iloc[p1_idx], df['low'].iloc[p2_idx]], color='#2ecc71', linewidth=2.5, marker='o')
-        ax1.text(d2, df['low'].iloc[p2_idx], "  Минимумы ↓", color='#2ecc71', fontsize=10, fontweight='bold')
-        ax2.plot([d1, d2], [df['rsi'].iloc[p1_idx], df['rsi'].iloc[p2_idx]], color='#2ecc71', linewidth=2.5, marker='o')
-        ax2.text(d2, df['rsi'].iloc[p2_idx], "  RSI ↑", color='#2ecc71', fontsize=10, fontweight='bold')
-        if sig['vol_div']:
-            ax3.plot([d1, d2], [df['volume'].iloc[p1_idx], df['volume'].iloc[p2_idx]], color='#2ecc71', linewidth=2, linestyle='--', marker='o')
-            ax3.text(d2, df['volume'].iloc[p2_idx], "  Объём (Подтв.)", color='#2ecc71', fontsize=9)
+    if is_bear:
+        y_price_1, y_price_2 = df['high'].iloc[p1_idx], df['high'].iloc[p2_idx]
+    else:
+        y_price_1, y_price_2 = df['low'].iloc[p1_idx], df['low'].iloc[p2_idx]
+
+    # Линия на цене
+    ax1.plot([d1, d2], [y_price_1, y_price_2], color=line_color, linewidth=2.5, marker='o')
+    price_arrow = "↑" if y_price_2 > y_price_1 else "↓"
+    ax1.text(d2, y_price_2, f"  Цена {price_arrow}", color=line_color, fontsize=10, fontweight='bold')
+
+    # Линия на RSI
+    y_rsi_1, y_rsi_2 = df['rsi'].iloc[p1_idx], df['rsi'].iloc[p2_idx]
+    ax2.plot([d1, d2], [y_rsi_1, y_rsi_2], color=line_color, linewidth=2.5, marker='o')
+    rsi_arrow = "↑" if y_rsi_2 > y_rsi_1 else "↓"
+    ax2.text(d2, y_rsi_2, f"  RSI {rsi_arrow}", color=line_color, fontsize=10, fontweight='bold')
+
+    # Линия на объёмах (если есть подтверждение)
+    if sig['vol_div']:
+        y_vol_1, y_vol_2 = df['volume'].iloc[p1_idx], df['volume'].iloc[p2_idx]
+        ax3.plot([d1, d2], [y_vol_1, y_vol_2], color=line_color, linewidth=2, linestyle='--', marker='o')
+        ax3.text(d2, y_vol_2, "  Объём (Подтв.)", color=line_color, fontsize=9)
 
     fig.suptitle(f"{coin} ({tf}) — {sig['type']}", color='white', fontsize=14, fontweight='bold')
     for ax in (ax1, ax2, ax3):
@@ -202,9 +212,7 @@ def send_telegram_with_photo(message, photo_path, symbol):
 
 def check_divergences_and_volumes(df, max_age=2):
     """
-    Ищет дивергенции.
-    max_age=2 — только свежие сигналы (для боевой работы).
-    max_age=20 — поиск недавней реальной дивергенции для проверки.
+    Ищет резкие Классические и Скрытые дивергенции.
     """
     closes = df['close'].values
     highs = df['high'].values
@@ -217,7 +225,7 @@ def check_divergences_and_volumes(df, max_age=2):
     rsi_peaks, rsi_troughs = find_pivots(rsis)
     signals = []
 
-    # МЕДВЕЖЬЯ (Шорт)
+    # --- МЕДВЕЖЬИ (ПО ПИКАМ): Классическая и Скрытая ---
     if len(rsi_peaks) >= 2:
         p2 = rsi_peaks[-1]
         age = n - 1 - p2
@@ -225,15 +233,31 @@ def check_divergences_and_volumes(df, max_age=2):
             for p1 in reversed(rsi_peaks[:-1]):
                 dist = p2 - p1
                 if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-                    price_higher = (highs[p2] > highs[p1]) and (closes[p2] >= closes[p1] * 0.998)
-                    rsi_lower = rsis[p2] <= (rsis[p1] - 1.5)
-                    rsi_zone = (rsis[p1] >= 55)
+                    # 1. Классическая медвежья (Цена ↑, RSI ↓)
+                    classic_bear = (
+                        highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
+                        rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
+                        rsis[p1] >= 65
+                    )
+                    # 2. Скрытая медвежья (Цена ↓, RSI ↑)
+                    hidden_bear = (
+                        highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
+                        rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
+                        rsis[p2] >= 55
+                    )
 
-                    if price_higher and rsi_lower and rsi_zone:
+                    if classic_bear or hidden_bear:
+                        sig_kind = "BEAR_CLASSIC" if classic_bear else "BEAR_HIDDEN"
+                        sig_label = (
+                            "🐻 Классическая медвежья (Шорт)"
+                            if classic_bear else
+                            "🐻 Скрытая медвежья (Шорт по тренду)"
+                        )
                         vol_div = volumes[p2] < volumes[p1]
                         signals.append({
-                            'id': f"BEAR_{int(timestamps[p2])}",
-                            'type': '🐻 Медвежья дивергенция (Шорт)',
+                            'id': f"{sig_kind}_{int(timestamps[p2])}",
+                            'direction': 'BEAR',
+                            'type': sig_label,
                             'p1_idx': p1,
                             'p2_idx': p2,
                             'age': age,
@@ -247,7 +271,7 @@ def check_divergences_and_volumes(df, max_age=2):
                         })
                         break
 
-    # БЫЧЬЯ (Лонг)
+    # --- БЫЧЬИ (ПО ВПАДИНАМ): Классическая и Скрытая ---
     if len(rsi_troughs) >= 2:
         t2 = rsi_troughs[-1]
         age = n - 1 - t2
@@ -255,15 +279,31 @@ def check_divergences_and_volumes(df, max_age=2):
             for t1 in reversed(rsi_troughs[:-1]):
                 dist = t2 - t1
                 if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-                    price_lower = (lows[t2] < lows[t1]) and (closes[t2] <= closes[t1] * 1.002)
-                    rsi_higher = rsis[t2] >= (rsis[t1] + 1.5)
-                    rsi_zone = (rsis[t1] <= 45)
+                    # 1. Классическая бычья (Цена ↓, RSI ↑)
+                    classic_bull = (
+                        lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
+                        rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
+                        rsis[t1] <= 35
+                    )
+                    # 2. Скрытая бычья (Цена ↑, RSI ↓)
+                    hidden_bull = (
+                        lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
+                        rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
+                        rsis[t2] <= 45
+                    )
 
-                    if price_lower and rsi_higher and rsi_zone:
+                    if classic_bull or hidden_bull:
+                        sig_kind = "BULL_CLASSIC" if classic_bull else "BULL_HIDDEN"
+                        sig_label = (
+                            "🐂 Классическая бычья (Лонг)"
+                            if classic_bull else
+                            "🐂 Скрытая бычья (Лонг по тренду)"
+                        )
                         vol_div = volumes[t2] < volumes[t1]
                         signals.append({
-                            'id': f"BULL_{int(timestamps[t2])}",
-                            'type': '🐂 Бычья дивергенция (Лонг)',
+                            'id': f"{sig_kind}_{int(timestamps[t2])}",
+                            'direction': 'BULL',
+                            'type': sig_label,
                             'p1_idx': t1,
                             'p2_idx': t2,
                             'age': age,
@@ -276,6 +316,7 @@ def check_divergences_and_volumes(df, max_age=2):
                             'vol_div': vol_div
                         })
                         break
+
     return signals
 
 def scan_single_pair(coin, tf):
@@ -295,12 +336,13 @@ def scan_single_pair(coin, tf):
 
 def format_message(coin, tf, sig, df_closed, header_prefix="🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ"):
     vol_status = "✅ Да (Подтверждено! 🔥)" if sig['vol_div'] else "❌ Нет (Только RSI)"
+    price_diff_pct = ((sig['price_p2'] - sig['price_p1']) / sig['price_p1']) * 100
     return (
         f"{header_prefix} ({tf})</b>\n\n"
         f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
         f"Паттерн: <b>{sig['type']}</b>\n"
         f"────────────────────────\n"
-        f"📉 Пики цены: <code>{sig['price_p1']:.5g}</code> ➔ <code>{sig['price_p2']:.5g}</code>\n"
+        f"📉 Экстремумы цены: <code>{sig['price_p1']:.5g}</code> ➔ <code>{sig['price_p2']:.5g}</code> ({price_diff_pct:+.2f}%)\n"
         f"📊 RSI (14): <b>{sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f}</b> (Сейчас: {sig['rsi_now']:.1f})\n"
         f"🔊 Дивергенция объёма: <b>{vol_status}</b>\n"
         f"💵 Текущая цена: <code>{sig['price_now']:.5g}</code>\n"
@@ -345,12 +387,12 @@ def run_scanner():
                 if os.path.exists(photo_name):
                     os.remove(photo_name)
 
-    # Если свежих сигналов прямо сейчас нет, 1 раз пришлём самую свежую реальную дивергенцию из последних 20 свечей
-    real_example_key = "REAL_EXAMPLE_SENT_V1"
+    # Одноразовый реальный пример по новым жёстким фильтрам (если прямо сейчас нет свежего сигнала)
+    real_example_key = "REAL_EXAMPLE_SENT_V2"
     if live_sent_count == 0 and real_example_key not in sent_signals:
         best_candidate = None
         for coin, tf, df_closed in scanned_data:
-            recent_sigs = check_divergences_and_volumes(df_closed, max_age=20)
+            recent_sigs = check_divergences_and_volumes(df_closed, max_age=25)
             for sig in recent_sigs:
                 if best_candidate is None or sig['age'] < best_candidate[2]['age']:
                     best_candidate = (coin, tf, sig, df_closed)
