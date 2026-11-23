@@ -16,18 +16,23 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 STATE_FILE = "fast_signals_state.json"
 
-TARGET_COINS = [
-    'XMR/USDT', 'BCH/USDT', 'ADA/USDT', 'BNB/USDT',
-    'LTC/USDT', 'HYPE/USDT', 'XRP/USDT', 'SOL/USDT',
-    'ZEC/USDT', 'BTC/USDT', 'ETH/USDT'
-]
-
-TIMEFRAMES = ['30m', '1h']  # Только 30-минутный и часовой таймфреймы
+TOP_N_COINS = 30
+TIMEFRAMES = ['30m', '1h']  # 30-минутный и часовой таймфреймы
 RSI_PERIOD = 14
 PIVOT_LEFT = 5       # Свечей слева до пика
-PIVOT_RIGHT = 2      # 2 закрытые свечи справа для точности
+PIVOT_RIGHT = 2      # 2 закрытые свечи справа для подтверждения
 MIN_PEAK_DIST = 5    # Мин. расстояние между экстремумами
 MAX_PEAK_DIST = 45   # Макс. расстояние
+
+STABLECOINS = {
+    'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
+    'USDD', 'PYUSD', 'EUR', 'USD1', 'USDP', 'RLUSD'
+}
+
+FALLBACK_COINS = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+    'ADA/USDT', 'LTC/USDT', 'BCH/USDT', 'XMR/USDT', 'ZEC/USDT', 'HYPE/USDT'
+]
 
 try:
     exchange = ccxt.mexc({
@@ -38,6 +43,31 @@ try:
 except Exception as e:
     print(f"❌ Ошибка инициализации MEXC: {e}")
     exit(1)
+
+def get_top_coins(limit=TOP_N_COINS):
+    """Загружает топ-N самых ликвидных USDT-пар на MEXC по суточному объёму."""
+    try:
+        tickers = exchange.fetch_tickers()
+        valid_pairs = []
+        for symbol, ticker in tickers.items():
+            if not symbol.endswith('/USDT') or symbol not in markets:
+                continue
+            if not markets[symbol].get('active', True):
+                continue
+            base = symbol.split('/')[0]
+            if base in STABLECOINS or base.endswith(('3L', '3S', '5L', '5S')):
+                continue
+            vol = ticker.get('quoteVolume') or 0
+            if vol > 0:
+                valid_pairs.append((symbol, vol))
+
+        valid_pairs.sort(key=lambda x: x[1], reverse=True)
+        top_symbols = [pair[0] for pair in valid_pairs[:limit]]
+        print(f"📋 Загружен топ-{len(top_symbols)} монет MEXC: {', '.join(top_symbols[:10])}...")
+        return top_symbols if top_symbols else FALLBACK_COINS
+    except Exception as e:
+        print(f"⚠ Не удалось загрузить топ-30 ({e}), использую резервный список.")
+        return [c for c in FALLBACK_COINS if c in markets]
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -82,7 +112,7 @@ def find_pivots(values, left=PIVOT_LEFT, right=PIVOT_RIGHT):
     return peaks, troughs
 
 def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
-    """Создаёт 3-панельный скриншот: Цена, RSI, Объём с линиями дивергенции"""
+    """Создаёт 3-панельный скриншот: Цена, RSI, Объём с линиями дивергенции."""
     fig, (ax1, ax2, ax3) = plt.subplots(
         3, 1, figsize=(12, 10), sharex=True,
         gridspec_kw={'height_ratios': [2, 1, 1]}
@@ -170,60 +200,12 @@ def send_telegram_with_photo(message, photo_path, symbol):
         print(f"❌ Ошибка отправки фото в Telegram: {e}")
         return False
 
-def send_one_time_test(sent_signals):
-    """Отправляет 1 тестовое сообщение с реальным графиком BTC/USDT, чтобы проверить формат"""
-    test_key = "TEST_ALERT_SENT_V1"
-    if test_key in sent_signals:
-        return False
-
-    try:
-        coin, tf = 'BTC/USDT', '1h'
-        ohlcv = exchange.fetch_ohlcv(coin, timeframe=tf, limit=80)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['rsi'] = calculate_rsi(df['close'], period=RSI_PERIOD)
-        df_closed = df.iloc[:-1].reset_index(drop=True)
-
-        p1, p2 = len(df_closed) - 25, len(df_closed) - 3
-        test_sig = {
-            'type': '🐂 Бычья дивергенция (Лонг) [ТЕСТ]',
-            'p1_idx': p1,
-            'p2_idx': p2,
-            'price_p1': df_closed['low'].iloc[p1],
-            'price_p2': df_closed['low'].iloc[p2],
-            'price_now': df_closed['close'].iloc[-1],
-            'rsi_p1': df_closed['rsi'].iloc[p1],
-            'rsi_p2': df_closed['rsi'].iloc[p2],
-            'rsi_now': df_closed['rsi'].iloc[-1],
-            'vol_div': True
-        }
-
-        photo_name = "test_div.png"
-        generate_divergence_chart(df_closed, tf, coin, test_sig, filename=photo_name)
-
-        msg = (
-            f"🧪 <b>ТЕСТОВОЕ ОПОВЕЩЕНИЕ ({tf})</b>\n"
-            f"<i>Так будут выглядеть реальные сигналы бота:</i>\n\n"
-            f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
-            f"Паттерн: <b>{test_sig['type']}</b>\n"
-            f"────────────────────────\n"
-            f"📉 Пики цены: <code>{test_sig['price_p1']:.5g}</code> ➔ <code>{test_sig['price_p2']:.5g}</code>\n"
-            f"📊 RSI (14): <b>{test_sig['rsi_p1']:.1f} ➔ {test_sig['rsi_p2']:.1f}</b> (Сейчас: {test_sig['rsi_now']:.1f})\n"
-            f"🔊 Дивергенция объёма: <b>✅ Да (Подтверждено! 🔥)</b>\n"
-            f"💵 Ориентировочный вход: <code>{test_sig['price_now']:.5g}</code>\n"
-            f"⏰ Свеча закрыта: <i>{time.strftime('%H:%M', time.gmtime(df_closed['timestamp'].iloc[-1]/1000))} UTC</i>"
-        )
-
-        if send_telegram_with_photo(msg, photo_name, coin):
-            sent_signals[test_key] = int(time.time())
-            print("🧪 Тестовое сообщение успешно отправлено!")
-            if os.path.exists(photo_name):
-                os.remove(photo_name)
-            return True
-    except Exception as e:
-        print(f"⚠ Ошибка отправки теста: {e}")
-    return False
-
-def check_divergences_and_volumes(df):
+def check_divergences_and_volumes(df, max_age=2):
+    """
+    Ищет дивергенции.
+    max_age=2 — только свежие сигналы (для боевой работы).
+    max_age=20 — поиск недавней реальной дивергенции для проверки.
+    """
     closes = df['close'].values
     highs = df['high'].values
     lows = df['low'].values
@@ -238,7 +220,8 @@ def check_divergences_and_volumes(df):
     # МЕДВЕЖЬЯ (Шорт)
     if len(rsi_peaks) >= 2:
         p2 = rsi_peaks[-1]
-        if (n - 1 - p2) in (1, 2):
+        age = n - 1 - p2
+        if 1 <= age <= max_age:
             for p1 in reversed(rsi_peaks[:-1]):
                 dist = p2 - p1
                 if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
@@ -253,6 +236,7 @@ def check_divergences_and_volumes(df):
                             'type': '🐻 Медвежья дивергенция (Шорт)',
                             'p1_idx': p1,
                             'p2_idx': p2,
+                            'age': age,
                             'price_p1': highs[p1],
                             'price_p2': highs[p2],
                             'price_now': closes[-1],
@@ -266,7 +250,8 @@ def check_divergences_and_volumes(df):
     # БЫЧЬЯ (Лонг)
     if len(rsi_troughs) >= 2:
         t2 = rsi_troughs[-1]
-        if (n - 1 - t2) in (1, 2):
+        age = n - 1 - t2
+        if 1 <= age <= max_age:
             for t1 in reversed(rsi_troughs[:-1]):
                 dist = t2 - t1
                 if MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
@@ -281,6 +266,7 @@ def check_divergences_and_volumes(df):
                             'type': '🐂 Бычья дивергенция (Лонг)',
                             'p1_idx': t1,
                             'p2_idx': t2,
+                            'age': age,
                             'price_p1': lows[t1],
                             'price_p2': lows[t2],
                             'price_now': closes[-1],
@@ -301,31 +287,45 @@ def scan_single_pair(coin, tf):
         df['rsi'] = calculate_rsi(df['close'], period=RSI_PERIOD)
 
         df_closed = df.iloc[:-1].reset_index(drop=True)
-        signals = check_divergences_and_volumes(df_closed)
-        return (coin, tf, signals, df_closed)
+        live_signals = check_divergences_and_volumes(df_closed, max_age=2)
+        return (coin, tf, live_signals, df_closed)
     except Exception as e:
         print(f"⚠ Ошибка сканирования {coin} {tf}: {e}")
         return None
 
+def format_message(coin, tf, sig, df_closed, header_prefix="🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ"):
+    vol_status = "✅ Да (Подтверждено! 🔥)" if sig['vol_div'] else "❌ Нет (Только RSI)"
+    return (
+        f"{header_prefix} ({tf})</b>\n\n"
+        f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
+        f"Паттерн: <b>{sig['type']}</b>\n"
+        f"────────────────────────\n"
+        f"📉 Пики цены: <code>{sig['price_p1']:.5g}</code> ➔ <code>{sig['price_p2']:.5g}</code>\n"
+        f"📊 RSI (14): <b>{sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f}</b> (Сейчас: {sig['rsi_now']:.1f})\n"
+        f"🔊 Дивергенция объёма: <b>{vol_status}</b>\n"
+        f"💵 Текущая цена: <code>{sig['price_now']:.5g}</code>\n"
+        f"⏰ Свеча закрыта: <i>{time.strftime('%H:%M', time.gmtime(df_closed['timestamp'].iloc[-1]/1000))} UTC</i>"
+    )
+
 def run_scanner():
     sent_signals = load_state()
     state_modified = False
+    live_sent_count = 0
 
-    # Отправляем одноразовый тест, если он ещё не отправлялся
-    if send_one_time_test(sent_signals):
-        state_modified = True
+    top_coins = get_top_coins(TOP_N_COINS)
+    tasks = [(coin, tf) for tf in TIMEFRAMES for coin in top_coins]
+    print(f"⚡ Старт сканирования {len(tasks)} графиков (топ-{len(top_coins)} MEXC) — {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    available_coins = [pair for pair in TARGET_COINS if pair in markets]
-    tasks = [(coin, tf) for tf in TIMEFRAMES for coin in available_coins]
-    print(f"⚡ Старт сканирования {len(tasks)} пар на MEXC — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    scanned_data = []
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(scan_single_pair, coin, tf) for coin, tf in tasks]
         for future in as_completed(futures):
             res = future.result()
             if not res:
                 continue
             coin, tf, signals, df_closed = res
+            scanned_data.append((coin, tf, df_closed))
 
             for sig in signals:
                 unique_key = f"{coin}_{tf}_{sig['id']}"
@@ -334,27 +334,41 @@ def run_scanner():
 
                 photo_name = f"div_{coin.replace('/', '_')}_{tf}.png"
                 generate_divergence_chart(df_closed, tf, coin, sig, filename=photo_name)
-
-                vol_status = "✅ Да (Подтверждено! 🔥)" if sig['vol_div'] else "❌ Нет (Только RSI)"
-                msg = (
-                    f"🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ ({tf})</b>\n\n"
-                    f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
-                    f"Паттерн: <b>{sig['type']}</b>\n"
-                    f"────────────────────────\n"
-                    f"📉 Пики цены: <code>{sig['price_p1']:.5g}</code> ➔ <code>{sig['price_p2']:.5g}</code>\n"
-                    f"📊 RSI (14): <b>{sig['rsi_p1']:.1f} ➔ {sig['rsi_p2']:.1f}</b> (Сейчас: {sig['rsi_now']:.1f})\n"
-                    f"🔊 Дивергенция объёма: <b>{vol_status}</b>\n"
-                    f"💵 Ориентировочный вход: <code>{sig['price_now']:.5g}</code>\n"
-                    f"⏰ Свеча закрыта: <i>{time.strftime('%H:%M', time.gmtime(df_closed['timestamp'].iloc[-1]/1000))} UTC</i>"
-                )
+                msg = format_message(coin, tf, sig, df_closed)
 
                 print(f"🔥 Найден сигнал {unique_key}. Отправка...")
                 if send_telegram_with_photo(msg, photo_name, coin):
                     sent_signals[unique_key] = int(time.time())
                     state_modified = True
+                    live_sent_count += 1
 
                 if os.path.exists(photo_name):
                     os.remove(photo_name)
+
+    # Если свежих сигналов прямо сейчас нет, 1 раз пришлём самую свежую реальную дивергенцию из последних 20 свечей
+    real_example_key = "REAL_EXAMPLE_SENT_V1"
+    if live_sent_count == 0 and real_example_key not in sent_signals:
+        best_candidate = None
+        for coin, tf, df_closed in scanned_data:
+            recent_sigs = check_divergences_and_volumes(df_closed, max_age=20)
+            for sig in recent_sigs:
+                if best_candidate is None or sig['age'] < best_candidate[2]['age']:
+                    best_candidate = (coin, tf, sig, df_closed)
+
+        if best_candidate:
+            coin, tf, sig, df_closed = best_candidate
+            photo_name = f"real_example_{coin.replace('/', '_')}_{tf}.png"
+            generate_divergence_chart(df_closed, tf, coin, sig, filename=photo_name)
+            msg = format_message(
+                coin, tf, sig, df_closed,
+                header_prefix=f"🔎 <b>РЕАЛЬНЫЙ ПРИМЕР (сформирован {sig['age']} свеч. назад)"
+            )
+            print(f"🔎 Отправка реального примера: {coin} {tf} (возраст: {sig['age']} свечей)")
+            if send_telegram_with_photo(msg, photo_name, coin):
+                sent_signals[real_example_key] = int(time.time())
+                state_modified = True
+            if os.path.exists(photo_name):
+                os.remove(photo_name)
 
     if state_modified:
         save_state(sent_signals)
