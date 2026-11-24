@@ -16,9 +16,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 STATE_FILE = "fast_signals_state.json"
 
-TOP_N_COINS = 50        # Берём топ-50 самых ликвидных (крупных) монет MEXC
+TOP_N_COINS = 50        # Топ-50 самых ликвидных USDT-M фьючерсов MEXC
 MAX_BTC_CORR = 0.50     # Макс. корреляция с BTC (ниже 0.50 = монета ходит сама по себе)
-ALWAYS_INCLUDE = ['BTC/USDT', 'XMR/USDT']  # Эти монеты сканируем всегда
+BTC_SYMBOL = 'BTC/USDT:USDT'
+ALWAYS_INCLUDE = ['BTC/USDT:USDT', 'XMR/USDT:USDT']  # Эти монеты сканируем всегда
 
 TIMEFRAMES = ['30m', '1h']
 RSI_PERIOD = 14
@@ -27,9 +28,9 @@ PIVOT_RIGHT = 2         # 2 закрытые свечи справа для по
 MIN_PEAK_DIST = 5       # Мин. расстояние между соседними пиками
 MAX_PEAK_DIST = 60      # Макс. расстояние между соседними пиками
 
-# ФИЛЬТРЫ ПРОТИВ БОКОВИКА
-MIN_PRICE_DIFF_PCT = 0.006  # Мин. разница между пиками цены: 0.6%
-MIN_RSI_DIFF = 3.5          # Мин. разница между пиками RSI: 3.5 пункта
+# ФИЛЬТРЫ ПРОТИВ БОКОВИКА (сбалансированы под фьючерсы)
+MIN_PRICE_DIFF_PCT = 0.004  # Мин. разница между пиками цены: 0.4%
+MIN_RSI_DIFF = 3.0          # Мин. разница между пиками RSI: 3.0 пункта
 
 STABLECOINS = {
     'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
@@ -39,27 +40,34 @@ STABLECOINS = {
 try:
     exchange = ccxt.mexc({
         'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
+        'options': {'defaultType': 'swap'}  # Фьючерсный рынок MEXC (USDT-M)
     })
     markets = exchange.load_markets()
 except Exception as e:
-    print(f"❌ Ошибка инициализации MEXC: {e}")
+    print(f"❌ Ошибка инициализации MEXC Futures: {e}")
     exit(1)
 
+def get_base_name(symbol):
+    """Извлекает тикер монеты (например, 'XMR' из 'XMR/USDT:USDT')."""
+    return symbol.split('/')[0]
+
 def get_top_liquid_coins(limit=TOP_N_COINS):
-    """Загружает топ-N самых ликвидных USDT-пар на MEXC по суточному объёму."""
+    """Загружает топ-N самых ликвидных USDT-M фьючерсов на MEXC по суточному объёму."""
     try:
         tickers = exchange.fetch_tickers()
         valid_pairs = []
         for symbol, ticker in tickers.items():
-            if not symbol.endswith('/USDT') or symbol not in markets:
+            if not symbol.endswith('/USDT:USDT') or symbol not in markets:
                 continue
-            if not markets[symbol].get('active', True):
+            market = markets[symbol]
+            if not market.get('active', True) or not market.get('swap', False):
                 continue
-            base = symbol.split('/')[0]
-            if base in STABLECOINS or base.endswith(('3L', '3S', '5L', '5S')):
+            base = get_base_name(symbol)
+            if base in STABLECOINS:
                 continue
-            vol = ticker.get('quoteVolume') or 0
+            vol = ticker.get('quoteVolume') or (
+                (ticker.get('baseVolume') or 0) * (ticker.get('last') or 0)
+            ) or 0
             if vol > 0:
                 valid_pairs.append((symbol, vol))
 
@@ -70,7 +78,7 @@ def get_top_liquid_coins(limit=TOP_N_COINS):
                 top_symbols.append(c)
         return top_symbols
     except Exception as e:
-        print(f"⚠ Ошибка загрузки топ-{limit}: {e}")
+        print(f"⚠ Ошибка загрузки топ-{limit} фьючерсов: {e}")
         return [c for c in ALWAYS_INCLUDE if c in markets]
 
 def load_state():
@@ -103,7 +111,7 @@ def calculate_rsi(series, period=14):
     return (100 - (100 / (1 + rs))).fillna(50)
 
 def calculate_btc_correlation(coin_df, btc_df):
-    """Считает корреляцию Пирсона по доходностям (pct_change) с BTC/USDT."""
+    """Считает корреляцию Пирсона по доходностям (pct_change) с BTC Futures."""
     merged = pd.merge(
         coin_df[['timestamp', 'close']],
         btc_df[['timestamp', 'close']],
@@ -111,7 +119,7 @@ def calculate_btc_correlation(coin_df, btc_df):
         suffixes=('_coin', '_btc')
     )
     if len(merged) < 30:
-        return 1.0  # Мало данных — не рискуем
+        return 1.0
     ret_coin = merged['close_coin'].pct_change().dropna()
     ret_btc = merged['close_btc'].pct_change().dropna()
     corr = ret_coin.corr(ret_btc)
@@ -192,7 +200,8 @@ def generate_divergence_chart(df, tf, coin, sig, filename="divergence.png"):
         ax3.plot([d1, d2], [y_vol_1, y_vol_2], color=line_color, linewidth=2, linestyle='--', marker='o')
         ax3.text(d2, y_vol_2, "  Объём (Подтв.)", color=line_color, fontsize=9)
 
-    fig.suptitle(f"{coin} ({tf}) — {sig['type']}", color='white', fontsize=14, fontweight='bold')
+    display_pair = f"{get_base_name(coin)}/USDT"
+    fig.suptitle(f"{display_pair} Futures ({tf}) — {sig['type']}", color='white', fontsize=14, fontweight='bold')
     for ax in (ax1, ax2, ax3):
         ax.set_facecolor('#131722')
         ax.tick_params(colors='white')
@@ -210,12 +219,12 @@ def send_telegram_with_photo(message, photo_path, symbol):
         print("⚠ Токен Telegram или CHAT_ID не настроены!")
         return False
 
-    base, quote = symbol.split('/')
-    mexc_url = f"https://www.mexc.com/ru-RU/trade/{base}_{quote}"
+    base = get_base_name(symbol)
+    mexc_url = f"https://futures.mexc.com/ru-RU/exchange/{base}_USDT"
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     keyboard = {
-        'inline_keyboard': [[{'text': '📊 Открыть график на MEXC', 'url': mexc_url}]]
+        'inline_keyboard': [[{'text': '📊 Открыть фьючерс на MEXC', 'url': mexc_url}]]
     }
 
     try:
@@ -256,12 +265,12 @@ def check_divergences_and_volumes(df, max_age=2):
                 classic_bear = (
                     highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
                     rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
-                    rsis[p1] >= 62
+                    rsis[p1] >= 55
                 )
                 hidden_bear = (
                     highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
                     rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
-                    rsis[p2] >= 52
+                    rsis[p2] >= 50
                 )
 
                 if classic_bear or hidden_bear:
@@ -298,12 +307,12 @@ def check_divergences_and_volumes(df, max_age=2):
                 classic_bull = (
                     lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
                     rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
-                    rsis[t1] <= 38
+                    rsis[t1] <= 45
                 )
                 hidden_bull = (
                     lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
                     rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
-                    rsis[t2] <= 48
+                    rsis[t2] <= 50
                 )
 
                 if classic_bull or hidden_bull:
@@ -343,13 +352,14 @@ def fetch_df(coin, tf, limit=100):
         return None
 
 def format_message(coin, tf, sig, df_closed, btc_corr):
+    base = get_base_name(coin)
     vol_status = "✅ Да (Подтверждено! 🔥)" if sig['vol_div'] else "❌ Нет (Только RSI)"
     price_diff_pct = ((sig['price_p2'] - sig['price_p1']) / sig['price_p1']) * 100
-    corr_line = "🔗 Базовый актив (BTC)\n" if coin == 'BTC/USDT' else f"🔗 Корреляция с BTC (1h): <b>{btc_corr:.2f}</b>\n"
+    corr_line = "🔗 Базовый актив (BTC)\n" if coin == BTC_SYMBOL else f"🔗 Корреляция с BTC (1h): <b>{btc_corr:.2f}</b>\n"
 
     return (
         f"🔔 <b>СИГНАЛ ДИВЕРГЕНЦИИ ({tf})</b>\n\n"
-        f"Монета: <b>#{coin.replace('/', '')} (MEXC)</b>\n"
+        f"Монета: <b>#{base}USDT (MEXC Futures)</b>\n"
         f"Паттерн: <b>{sig['type']}</b>\n"
         f"{corr_line}"
         f"────────────────────────\n"
@@ -364,14 +374,14 @@ def run_scanner():
     sent_signals = load_state()
     state_modified = False
 
-    # 1. Загружаем эталонный график BTC (1h) для расчёта корреляции
-    btc_df_1h = fetch_df('BTC/USDT', '1h', limit=100)
+    # 1. Загружаем эталонный график BTC Futures (1h)
+    btc_df_1h = fetch_df(BTC_SYMBOL, '1h', limit=100)
     if btc_df_1h is None:
-        print("❌ Не удалось загрузить свечи BTC/USDT")
+        print("❌ Не удалось загрузить свечи BTC Futures")
         return
 
     top_coins = get_top_liquid_coins(TOP_N_COINS)
-    print(f"⚡ Проверка корреляции с BTC для топ-{len(top_coins)} монет MEXC...")
+    print(f"⚡ Проверка корреляции с BTC для топ-{len(top_coins)} фьючерсов MEXC...")
 
     # 2. Загружаем 1h для всех топ-50 и отбираем некоррелирующие с BTC
     selected_coins = {}  # {coin: (corr, df_1h)}
@@ -384,14 +394,17 @@ def run_scanner():
             if df_1h is None:
                 continue
 
-            corr = 1.0 if coin == 'BTC/USDT' else calculate_btc_correlation(df_1h, btc_df_1h)
+            corr = 1.0 if coin == BTC_SYMBOL else calculate_btc_correlation(df_1h, btc_df_1h)
             if coin in ALWAYS_INCLUDE or abs(corr) <= MAX_BTC_CORR:
                 selected_coins[coin] = (corr, df_1h)
 
-    decorrelated_list = [f"{c} ({v[0]:.2f})" for c, v in selected_coins.items() if c != 'BTC/USDT']
-    print(f"🎯 Отобрано независимых монет ({len(selected_coins)}): {', '.join(decorrelated_list)}")
+    decorrelated_list = [
+        f"{get_base_name(c)} ({v[0]:.2f})"
+        for c, v in selected_coins.items() if c != BTC_SYMBOL
+    ]
+    print(f"🎯 Отобрано независимых фьючерсов ({len(selected_coins)}): {', '.join(decorrelated_list)}")
 
-    # 3. Проверяем дивергенции на 1h (уже загружено) и на 30m (догружаем только для отобранных)
+    # 3. Проверяем дивергенции на 1h и догружаем 30m для отобранных
     results_to_check = []
     for coin, (corr, df_1h) in selected_coins.items():
         results_to_check.append((coin, '1h', corr, df_1h))
@@ -411,11 +424,12 @@ def run_scanner():
     for coin, tf, corr, df_closed in results_to_check:
         signals = check_divergences_and_volumes(df_closed, max_age=2)
         for sig in signals:
-            unique_key = f"{coin}_{tf}_{sig['id']}"
+            base = get_base_name(coin)
+            unique_key = f"{base}_USDT_SWAP_{tf}_{sig['id']}"
             if unique_key in sent_signals:
                 continue
 
-            photo_name = f"div_{coin.replace('/', '_')}_{tf}.png"
+            photo_name = f"div_{base}_USDT_{tf}.png"
             generate_divergence_chart(df_closed, tf, coin, sig, filename=photo_name)
             msg = format_message(coin, tf, sig, df_closed, corr)
 
