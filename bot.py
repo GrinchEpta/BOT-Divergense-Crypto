@@ -19,7 +19,12 @@ STATE_FILE = "fast_signals_state.json"
 TOP_N_COINS = 50        # Топ-50 самых ликвидных USDT-M фьючерсов MEXC
 MAX_BTC_CORR = 0.50     # Макс. корреляция с BTC (ниже 0.50 = монета ходит сама по себе)
 BTC_SYMBOL = 'BTC/USDT:USDT'
-ALWAYS_INCLUDE = ['BTC/USDT:USDT', 'XMR/USDT:USDT']  # Эти монеты сканируем всегда
+ALWAYS_INCLUDE = [
+    'BTC/USDT:USDT',
+    'ETH/USDT:USDT',
+    'ZEC/USDT:USDT',
+    'XMR/USDT:USDT'
+]  # Эти монеты сканируем всегда, независимо от корреляции с BTC
 
 TIMEFRAMES = ['30m', '1h']
 RSI_PERIOD = 14
