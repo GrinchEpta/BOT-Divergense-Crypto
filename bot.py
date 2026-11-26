@@ -28,14 +28,15 @@ ALWAYS_INCLUDE = [
 
 TIMEFRAMES = ['30m', '1h']
 RSI_PERIOD = 14
-PIVOT_LEFT = 5          # Свечей слева до пика (как в TradingView)
+PIVOT_LEFT = 3          # Свечей слева до пика (ловит и короткие развороты)
 PIVOT_RIGHT = 2         # 2 закрытые свечи справа для подтверждения
-MIN_PEAK_DIST = 5       # Мин. расстояние между соседними пиками
-MAX_PEAK_DIST = 60      # Макс. расстояние между соседними пиками
+MIN_PEAK_DIST = 3       # Мин. расстояние между пиками
+MAX_PEAK_DIST = 60      # Макс. расстояние между пиками
+LOOKBACK_PIVOTS = 4     # Проверяем до 4 предыдущих пиков/впадин назад
 
-# ФИЛЬТРЫ ПРОТИВ БОКОВИКА (сбалансированы под фьючерсы)
-MIN_PRICE_DIFF_PCT = 0.004  # Мин. разница между пиками цены: 0.4%
-MIN_RSI_DIFF = 3.0          # Мин. разница между пиками RSI: 3.0 пункта
+# ФИЛЬТРЫ ПРОТИВ БОКОВИКА
+MIN_PRICE_DIFF_PCT = 0.003  # Мин. разница между пиками цены: 0.3%
+MIN_RSI_DIFF = 2.5          # Мин. разница между пиками RSI: 2.5 пункта
 
 STABLECOINS = {
     'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'BUSD',
@@ -259,23 +260,27 @@ def check_divergences_and_volumes(df, max_age=2):
     rsi_peaks, rsi_troughs = find_pivots(rsis)
     signals = []
 
-    # --- МЕДВЕЖЬИ (ПО СОСЕДНИМ ПИКАМ) ---
+    # --- МЕДВЕЖЬИ (ПРОВЕРЯЕМ ДО 4 ПРЕДЫДУЩИХ ПИКОВ) ---
     if len(rsi_peaks) >= 2:
-        p1, p2 = rsi_peaks[-2], rsi_peaks[-1]
+        p2 = rsi_peaks[-1]
         age = n - 1 - p2
-        dist = p2 - p1
 
-        if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-            if is_line_clean(rsis, p1, p2, is_upper=True):
+        if 1 <= age <= max_age:
+            prev_peaks = rsi_peaks[max(0, len(rsi_peaks) - 1 - LOOKBACK_PIVOTS) : -1]
+            for p1 in prev_peaks:  # От более широкой к ближней
+                dist = p2 - p1
+                if not (MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST):
+                    continue
+                if not is_line_clean(rsis, p1, p2, is_upper=True):
+                    continue
+
                 classic_bear = (
                     highs[p2] >= highs[p1] * (1 + MIN_PRICE_DIFF_PCT) and
-                    rsis[p2] <= rsis[p1] - MIN_RSI_DIFF and
-                    rsis[p1] >= 55
+                    rsis[p2] <= rsis[p1] - MIN_RSI_DIFF
                 )
                 hidden_bear = (
                     highs[p2] <= highs[p1] * (1 - MIN_PRICE_DIFF_PCT) and
-                    rsis[p2] >= rsis[p1] + MIN_RSI_DIFF and
-                    rsis[p2] >= 50
+                    rsis[p2] >= rsis[p1] + MIN_RSI_DIFF
                 )
 
                 if classic_bear or hidden_bear:
@@ -300,24 +305,29 @@ def check_divergences_and_volumes(df, max_age=2):
                         'rsi_now': rsis[-1],
                         'vol_div': volumes[p2] < volumes[p1]
                     })
+                    break  # Берём самую широкую чистую линию для этой свечи
 
-    # --- БЫЧЬИ (ПО СОСЕДНИМ ВПАДИНАМ) ---
+    # --- БЫЧЬИ (ПРОВЕРЯЕМ ДО 4 ПРЕДЫДУЩИХ ВПАДИН) ---
     if len(rsi_troughs) >= 2:
-        t1, t2 = rsi_troughs[-2], rsi_troughs[-1]
+        t2 = rsi_troughs[-1]
         age = n - 1 - t2
-        dist = t2 - t1
 
-        if 1 <= age <= max_age and MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST:
-            if is_line_clean(rsis, t1, t2, is_upper=False):
+        if 1 <= age <= max_age:
+            prev_troughs = rsi_troughs[max(0, len(rsi_troughs) - 1 - LOOKBACK_PIVOTS) : -1]
+            for t1 in prev_troughs:  # От более широкой к ближней
+                dist = t2 - t1
+                if not (MIN_PEAK_DIST <= dist <= MAX_PEAK_DIST):
+                    continue
+                if not is_line_clean(rsis, t1, t2, is_upper=False):
+                    continue
+
                 classic_bull = (
                     lows[t2] <= lows[t1] * (1 - MIN_PRICE_DIFF_PCT) and
-                    rsis[t2] >= rsis[t1] + MIN_RSI_DIFF and
-                    rsis[t1] <= 45
+                    rsis[t2] >= rsis[t1] + MIN_RSI_DIFF
                 )
                 hidden_bull = (
                     lows[t2] >= lows[t1] * (1 + MIN_PRICE_DIFF_PCT) and
-                    rsis[t2] <= rsis[t1] - MIN_RSI_DIFF and
-                    rsis[t2] <= 50
+                    rsis[t2] <= rsis[t1] - MIN_RSI_DIFF
                 )
 
                 if classic_bull or hidden_bull:
@@ -342,6 +352,7 @@ def check_divergences_and_volumes(df, max_age=2):
                         'rsi_now': rsis[-1],
                         'vol_div': volumes[t2] < volumes[t1]
                     })
+                    break  # Берём самую широкую чистую линию для этой свечи
 
     return signals
 
