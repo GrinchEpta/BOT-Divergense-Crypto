@@ -23,7 +23,7 @@ COINS = [
     'XMR/USDT:USDT'
 ]
 
-TIMEFRAMES = ['30m', '1h']
+TIMEFRAMES = ['30m', '1h', '4h']
 RSI_PERIOD = 14
 PIVOT_LEFT = 3          # Свечей слева до пика (ловит и короткие развороты)
 PIVOT_RIGHT = 2         # 2 закрытые свечи справа для подтверждения
